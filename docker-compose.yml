@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: urn_clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: urn_acoustics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - urn_net
+
+  mqtt:
+    image: eclipse-mosquitto:2.0
+    container_name: urn_mqtt
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    networks:
+      - urn_net
+
+  backend:
+    build: ./backend
+    container_name: urn_backend
+    ports:
+      - "8080:8080"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+    environment:
+      - URN__CLICKHOUSE__URL=http://clickhouse:8123
+      - URN__MQTT__BROKER=mqtt
+      - URN__MQTT__PORT=1883
+    networks:
+      - urn_net
+    restart: unless-stopped
+
+volumes:
+  clickhouse_data:
+  mosquitto_data:
+  mosquitto_log:
+
+networks:
+  urn_net:
+    driver: bridge
