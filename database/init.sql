@@ -130,3 +130,85 @@ AS SELECT
     avg(medium_density) AS avg_density
 FROM sensor_data
 GROUP BY device_id, toStartOfMinute(timestamp);
+
+CREATE TABLE IF NOT EXISTS sensor_data_1h_agg
+(
+    timestamp DateTime('Asia/Shanghai'),
+    device_id UInt32,
+    sample_count UInt64,
+    avg_spl Float64,
+    max_spl Float64,
+    min_spl Float64,
+    avg_res_freq Float64,
+    avg_density Float64,
+    stddev_spl Float64
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (device_id, timestamp)
+TTL timestamp + INTERVAL 1 YEAR
+COMMENT '传感器数据1小时聚合 - 用于长期趋势分析';
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_data_1h_mv
+TO sensor_data_1h_agg
+AS SELECT
+    toStartOfHour(timestamp) AS timestamp,
+    device_id,
+    count() AS sample_count,
+    avg(sound_pressure_level) AS avg_spl,
+    max(sound_pressure_level) AS max_spl,
+    min(sound_pressure_level) AS min_spl,
+    avg(resonance_frequency) AS avg_res_freq,
+    avg(medium_density) AS avg_density,
+    stddevPop(sound_pressure_level) AS stddev_spl
+FROM sensor_data
+GROUP BY device_id, toStartOfHour(timestamp);
+
+CREATE TABLE IF NOT EXISTS resonance_analysis_1d_agg
+(
+    day Date,
+    device_id UInt32,
+    reading_count UInt64,
+    avg_gain_db Float64,
+    avg_drift_percent Float64,
+    max_drift_percent Float64,
+    anomaly_count UInt64,
+    avg_q_factor Float64
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(day)
+ORDER BY (device_id, day)
+TTL day + INTERVAL 2 YEAR
+COMMENT '共振分析日聚合表';
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS resonance_analysis_1d_mv
+TO resonance_analysis_1d_agg
+AS SELECT
+    toDate(timestamp) AS day,
+    device_id,
+    count() AS reading_count,
+    avg(gain_db) AS avg_gain_db,
+    avg(drift_percent) AS avg_drift_percent,
+    max(drift_percent) AS max_drift_percent,
+    countIf(is_anomaly) AS anomaly_count,
+    avg(quality_factor) AS avg_q_factor
+FROM resonance_analysis
+GROUP BY device_id, toDate(timestamp);
+
+CREATE TABLE IF NOT EXISTS alerts_archive
+(
+    timestamp DateTime64(3, 'Asia/Shanghai'),
+    alert_id UUID,
+    alert_type String,
+    severity String,
+    device_id Nullable(UInt32),
+    message String,
+    details String,
+    is_resolved Bool,
+    archived_at DateTime DEFAULT now()
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (severity, timestamp)
+TTL timestamp + INTERVAL 2 YEAR
+COMMENT '告警归档表 - 历史告警长期保存';

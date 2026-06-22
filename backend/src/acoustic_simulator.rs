@@ -1,5 +1,6 @@
 use crate::acoustics::{AcousticAnalyzer, BEMCorrection, HelmholtzResonator, UrnShape};
 use crate::config_loader::AcousticsConfig;
+use crate::metrics;
 use crate::models::ResonanceAnalysisResult;
 use crate::pipeline::{AcousticJobResult, ValidSensorReading};
 use chrono::Utc;
@@ -64,6 +65,8 @@ impl AcousticSimulator {
         let reading = &valid.reading;
         let device = &valid.device;
 
+        metrics::inc_acoustic_calcs();
+
         let mut resonator = HelmholtzResonator::from_device(device, self.acoustics_cfg.speed_of_sound_air);
 
         resonator = resonator.with_shape(self.parse_shape(&self.acoustics_cfg.default_shape));
@@ -90,6 +93,8 @@ impl AcousticSimulator {
 
         let q_factor = resonator.quality_factor();
         let is_anomaly = drift_percent > self.acoustics_cfg.drift_warning_threshold_percent;
+
+        metrics::observe_resonance_drift(drift_percent);
 
         let analysis = ResonanceAnalysisResult {
             timestamp: Utc::now(),

@@ -1,9 +1,11 @@
-use crate::handlers::AppState;
+use crate::alarm_ws::AlarmWsService;
+use crate::metrics;
 use crate::models::WebSocketMessage;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
+use std::sync::Arc;
 use tracing::{debug, error, info};
 
 pub async fn websocket_handler(
@@ -19,6 +21,7 @@ async fn handle_socket<AM: WsSenderProvider>(socket: WebSocket, alarm_manager: A
     let mut rx = alarm_manager.broadcast_rx();
 
     info!("新WebSocket客户端已连接");
+    metrics::ws_client_connected();
 
     let send_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
@@ -58,6 +61,7 @@ async fn handle_socket<AM: WsSenderProvider>(socket: WebSocket, alarm_manager: A
     }
 
     info!("WebSocket客户端已断开");
+    metrics::ws_client_disconnected();
 }
 
 pub trait WsSenderProvider: Send + Sync + 'static {

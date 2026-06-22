@@ -1,3 +1,4 @@
+use crate::metrics;
 use crate::models::{Alert, ResonanceAnalysisResult, SensorReading, SourceLocalizationResult};
 use crate::store::ClickHouseStore;
 use std::sync::Arc;
@@ -30,6 +31,7 @@ impl DbWriter {
                         warn!("[DbWriter] 写入 sensor_data 失败: {}", e);
                     } else {
                         counts.0 += 1;
+                        metrics::inc_db_writes("sensor_data");
                     }
                 }
                 Some(a) = rx_resonance.recv() => {
@@ -37,6 +39,7 @@ impl DbWriter {
                         warn!("[DbWriter] 写入 resonance_analysis 失败: {}", e);
                     } else {
                         counts.1 += 1;
+                        metrics::inc_db_writes("resonance_analysis");
                     }
                 }
                 Some(l) = rx_localization.recv() => {
@@ -44,6 +47,7 @@ impl DbWriter {
                         warn!("[DbWriter] 写入 source_localization 失败: {}", e);
                     } else {
                         counts.2 += 1;
+                        metrics::inc_db_writes("source_localization");
                     }
                 }
                 Some(al) = rx_alert.recv() => {
@@ -51,6 +55,7 @@ impl DbWriter {
                         warn!("[DbWriter] 写入 alerts 失败: {}", e);
                     } else {
                         counts.3 += 1;
+                        metrics::inc_db_writes("alerts");
                     }
                 }
                 else => {

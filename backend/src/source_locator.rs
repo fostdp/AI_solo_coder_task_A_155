@@ -1,5 +1,6 @@
 use crate::config_loader::LocalizationConfig;
 use crate::localization::Beamformer;
+use crate::metrics;
 use crate::models::{SensorReading, SourceLocalizationResult, UrnDevice};
 use crate::pipeline::{AcousticJobResult, LocalizationJobResult};
 use dashmap::DashMap;
@@ -127,7 +128,13 @@ impl SourceLocator {
         *counter += 1;
         drop(counter);
 
-        beamformer.locate_source(&readings_devices, source_id)
+        metrics::inc_localizations();
+
+        let result = beamformer.locate_source(&readings_devices, source_id);
+        if let Some(ref loc) = result {
+            metrics::observe_localization_confidence(loc.confidence);
+        }
+        result
     }
 
     pub fn beamformer(&self) -> &Beamformer {

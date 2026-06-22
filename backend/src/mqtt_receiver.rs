@@ -1,4 +1,5 @@
 use crate::config_loader::MqttConfig;
+use crate::metrics;
 use crate::models::{SensorReading, UrnDevice};
 use crate::pipeline::{validate_reading, ValidSensorReading};
 use dashmap::DashMap;
@@ -73,9 +74,12 @@ impl MqttReceiver {
         tx_alarm: &mpsc::Sender<ValidSensorReading>,
         tx_raw_db: &mpsc::Sender<SensorReading>,
     ) {
+        metrics::inc_mqtt_messages();
+
         let reading: SensorReading = match serde_json::from_slice(payload) {
             Ok(r) => r,
             Err(e) => {
+                metrics::inc_invalid_readings();
                 warn!(
                     "[MQTT] JSON 解析失败: {} 原始数据前100字节: {:?}",
                     e,
@@ -85,6 +89,8 @@ impl MqttReceiver {
             }
         };
 
+        metrics::observe_spl(reading.sound_pressure_level);
+
         if let Err(_e) = tx_raw_db.send(reading.clone()).await {
             warn!("[MQTT] 原始数据入库通道已满，丢弃数据 device_id={}", reading.device_id);
         }
@@ -92,6 +98,7 @@ impl MqttReceiver {
         match validate_reading(&reading) {
             Ok(()) => {}
             Err(errs) => {
+                metrics::inc_invalid_readings();
                 warn!(
                     "[MQTT] 数据校验失败 device_id={}, 错误: {:?}",
                     reading.device_id, errs

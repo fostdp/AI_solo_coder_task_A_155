@@ -1,4 +1,5 @@
 use crate::config_loader::AlertConfig;
+use crate::metrics;
 use crate::models::{Alert, ResonanceAnalysisResult, SensorReading, SourceLocalizationResult, WebSocketMessage};
 use crate::pipeline::{AcousticJobResult, LocalizationJobResult, ValidSensorReading};
 use chrono::Utc;
@@ -114,6 +115,7 @@ impl AlarmWsService {
             is_resolved: false,
         };
 
+        metrics::inc_alerts(severity);
         self.mark_emitted(&key);
         Some(alert)
     }
@@ -155,6 +157,7 @@ impl AlarmWsService {
             is_resolved: false,
         };
 
+        metrics::inc_alerts(severity);
         self.mark_emitted(&key);
         Some(alert)
     }

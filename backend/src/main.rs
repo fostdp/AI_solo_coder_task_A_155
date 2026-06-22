@@ -5,6 +5,7 @@ mod config_loader;
 mod db_writer;
 mod handlers;
 mod localization;
+mod metrics;
 mod models;
 mod mqtt_receiver;
 mod pipeline;
@@ -24,10 +25,15 @@ use source_locator::SourceLocator;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::mpsc;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use axum::http::header::{HeaderName, HeaderValue};
+use axum::response::PlainText;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -55,6 +61,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    metrics::init_metrics();
 
     let devices = Arc::new(DashMap::<u32, UrnDevice>::new());
     register_default_devices(&devices);
@@ -151,8 +159,11 @@ async fn main() {
     let static_dir_path = cfg.app.server.static_dir.clone();
     let serve_dir = ServeDir::new(static_dir_path);
 
+    let compression = CompressionLayer::new().gzip(true);
+
     let app = Router::new()
         .route("/api/health", get(handlers::health_check))
+        .route("/metrics", get(metrics_handler))
         .route("/api/devices", get(handlers::get_devices).post(handlers::create_device))
         .route("/api/devices/:id", get(handlers::get_device))
         .route("/api/sensor-data", get(handlers::get_sensor_data))
@@ -165,7 +176,13 @@ async fn main() {
         .route("/api/ws/broadcast-test", get(handlers::broadcast_test_message))
         .route("/ws", get(websocket::websocket_handler))
         .fallback_service(serve_dir)
+        .layer(compression)
         .layer(cors)
+        .layer(TraceLayer::new_for_http())
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-powered-by"),
+            HeaderValue::from_static("urn-acoustics/0.1.0"),
+        ))
         .with_state(app_state);
 
     let addr = format!("{}:{}", cfg.app.server.host, cfg.app.server.port);
@@ -224,4 +241,8 @@ async fn shutdown_signal() {
     }
 
     info!("[Boot] 收到关闭信号，正在优雅停止服务...");
+}
+
+async fn metrics_handler() -> PlainText<String> {
+    PlainText(metrics::render_prometheus())
 }
