@@ -1,0 +1,27 @@
+[package]
+name = "urn-acoustics-backend"
+version = "0.1.0"
+edition = "2021"
+description = "古代瓮听声学共振与声源定位仿真系统后端"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+axum = { version = "0.7", features = ["ws", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rumqttc = "0.23"
+clickhouse = { version = "0.11", features = ["tokio", "serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde", "utc"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+dashmap = "5.5"
+parking_lot = "0.12"
+byteorder = "1.5"
+approx = "0.5"
+rand = "0.8"
+
+[dev-dependencies]
+tokio-test = "0.4"
