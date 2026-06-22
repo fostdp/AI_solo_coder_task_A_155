@@ -3,7 +3,8 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::f64::consts::PI;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub enum BeamformingMethod {
     DelayAndSum,
     MVDR,

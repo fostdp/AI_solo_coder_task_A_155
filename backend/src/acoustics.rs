@@ -602,6 +602,15 @@ impl AcousticAnalyzer {
         self
     }
 
+    pub fn use_bem(&self) -> bool {
+        self.use_bem
+    }
+
+    pub fn check_resonance_anomaly(&self, measured_freq: f64, theoretical_freq: f64) -> bool {
+        let drift_percent = ((measured_freq - theoretical_freq) / theoretical_freq).abs() * 100.0;
+        drift_percent > self.drift_warning_threshold
+    }
+
     pub fn analyze(
         &self,
         reading: &SensorReading,

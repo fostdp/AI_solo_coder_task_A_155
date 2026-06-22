@@ -1,8 +1,9 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use clickhouse::Row;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Row)]
 pub struct SensorReading {
     pub timestamp: DateTime<Utc>,
     pub device_id: u32,
@@ -14,7 +15,7 @@ pub struct SensorReading {
     pub humidity: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Row)]
 pub struct UrnDevice {
     pub device_id: u32,
     pub device_name: String,
@@ -26,7 +27,7 @@ pub struct UrnDevice {
     pub neck_length: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Row)]
 pub struct ResonanceAnalysisResult {
     pub timestamp: DateTime<Utc>,
     pub device_id: u32,
@@ -55,7 +56,7 @@ pub struct SourceLocalizationResult {
     pub used_devices: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Row)]
 pub struct Alert {
     pub timestamp: DateTime<Utc>,
     pub alert_id: Uuid,
@@ -84,10 +85,13 @@ impl WebSocketMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Row)]
 pub struct MediumProperty {
     pub medium_type: String,
+    pub display_name: String,
     pub density: f64,
     pub sound_speed: f64,
     pub attenuation_coeff: f64,
+    pub depth_start: f64,
+    pub thickness: f64,
 }

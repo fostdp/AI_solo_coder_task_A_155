@@ -1,137 +1,35 @@
+mod acoustic_simulator;
 mod acoustics;
-mod alerts;
-mod config;
+mod alarm_ws;
+mod config_loader;
+mod db_writer;
 mod handlers;
 mod localization;
 mod models;
-mod mqtt_subscriber;
+mod mqtt_receiver;
+mod pipeline;
+mod source_locator;
 mod store;
 mod websocket;
 
-use acoustics::AcousticAnalyzer;
-use alerts::AlertManager;
-use axum::routing::{get, post};
-use axum::Router;
+use acoustic_simulator::AcousticSimulator;
+use alarm_ws::AlarmWsService;
+use config_loader::ConfigBundle;
 use dashmap::DashMap;
+use db_writer::DbWriter;
 use handlers::AppState;
-use localization::Beamformer;
+use mqtt_receiver::MqttReceiver;
 use models::UrnDevice;
-use mqtt_subscriber::MqttSubscriber;
+use source_locator::SourceLocator;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tokio::signal;
+use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-fn load_config() -> config::Config {
-    config::Config {
-        server: config::ServerConfig {
-            host: "0.0.0.0".to_string(),
-            port: 8080,
-            static_dir: std::path::PathBuf::from("../frontend"),
-        },
-        mqtt: config::MqttConfig {
-            broker: "localhost".to_string(),
-            port: 1883,
-            client_id: "urn_acoustics_backend".to_string(),
-            topic: "urn/sensors/#".to_string(),
-            username: None,
-            password: None,
-        },
-        clickhouse: config::ClickHouseConfig {
-            url: "http://localhost:8123".to_string(),
-            database: "urn_acoustics".to_string(),
-            user: "default".to_string(),
-            password: "".to_string(),
-        },
-        acoustics: config::AcousticsConfig {
-            speed_of_sound: 343.0,
-            default_urn_volume: 0.05,
-            default_neck_radius: 0.05,
-            default_neck_length: 0.1,
-            drift_warning_threshold_percent: 5.0,
-            drift_critical_threshold_percent: 15.0,
-        },
-        localization: config::LocalizationConfig {
-            sound_speed_soil: 1500.0,
-            beamforming_resolution: 1.0,
-            max_localization_distance: 500.0,
-            localization_confidence_threshold: 0.3,
-        },
-        alert: config::AlertConfig {
-            frequency_drift_warning: 5.0,
-            localization_bias_warning: 50.0,
-            cooldown_seconds: 30,
-        },
-    }
-}
-
-mod config {
-    use serde::Deserialize;
-    use std::path::PathBuf;
-
-    #[derive(Debug, Deserialize, Clone)]
-    pub struct Config {
-        pub server: ServerConfig,
-        pub mqtt: MqttConfig,
-        pub clickhouse: ClickHouseConfig,
-        pub acoustics: AcousticsConfig,
-        pub localization: LocalizationConfig,
-        pub alert: AlertConfig,
-    }
-
-    #[derive(Debug, Deserialize, Clone)]
-    pub struct ServerConfig {
-        pub host: String,
-        pub port: u16,
-        pub static_dir: PathBuf,
-    }
-
-    #[derive(Debug, Deserialize, Clone)]
-    pub struct MqttConfig {
-        pub broker: String,
-        pub port: u16,
-        pub client_id: String,
-        pub topic: String,
-        pub username: Option<String>,
-        pub password: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize, Clone)]
-    pub struct ClickHouseConfig {
-        pub url: String,
-        pub database: String,
-        pub user: String,
-        pub password: String,
-    }
-
-    #[derive(Debug, Deserialize, Clone)]
-    pub struct AcousticsConfig {
-        pub speed_of_sound: f64,
-        pub default_urn_volume: f64,
-        pub default_neck_radius: f64,
-        pub default_neck_length: f64,
-        pub drift_warning_threshold_percent: f64,
-        pub drift_critical_threshold_percent: f64,
-    }
-
-    #[derive(Debug, Deserialize, Clone)]
-    pub struct LocalizationConfig {
-        pub sound_speed_soil: f64,
-        pub beamforming_resolution: f64,
-        pub max_localization_distance: f64,
-        pub localization_confidence_threshold: f64,
-    }
-
-    #[derive(Debug, Deserialize, Clone)]
-    pub struct AlertConfig {
-        pub frequency_drift_warning: f64,
-        pub localization_bias_warning: f64,
-        pub cooldown_seconds: u64,
-    }
-}
+use axum::routing::{get, post};
+use axum::Router;
 
 #[tokio::main]
 async fn main() {
@@ -143,118 +41,106 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let config = load_config();
-
-    let (tx, _rx) = broadcast::channel::<models::WebSocketMessage>(256);
-
-    let alert_manager = AlertManager::new(
-        config.alert.frequency_drift_warning,
-        config.alert.localization_bias_warning,
-        config.alert.cooldown_seconds,
-        tx.clone(),
-    );
-
-    let store = store::ClickHouseStore::new(
-        &config.clickhouse.url,
-        &config.clickhouse.database,
-        &config.clickhouse.user,
-        &config.clickhouse.password,
-    );
+    info!("[Boot] 加载配置文件...");
+    let cfg = match ConfigBundle::load() {
+        Ok(c) => {
+            info!(
+                "[Boot] 配置加载成功: MQTT={}:{} HTTP={}:{}",
+                c.app.mqtt.broker, c.app.mqtt.port, c.app.server.host, c.app.server.port
+            );
+            c
+        }
+        Err(e) => {
+            error!("[Boot] 配置加载失败: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let devices = Arc::new(DashMap::<u32, UrnDevice>::new());
+    register_default_devices(&devices);
 
-    let default_devices = vec![
-        UrnDevice {
-            device_id: 1,
-            device_name: "瓮听-东北角".to_string(),
-            deployment_x: -50.0,
-            deployment_y: -50.0,
-            deployment_z: -2.0,
-            urn_volume: 0.05,
-            neck_radius: 0.05,
-            neck_length: 0.1,
-        },
-        UrnDevice {
-            device_id: 2,
-            device_name: "瓮听-东南角".to_string(),
-            deployment_x: 50.0,
-            deployment_y: -50.0,
-            deployment_z: -2.0,
-            urn_volume: 0.05,
-            neck_radius: 0.05,
-            neck_length: 0.1,
-        },
-        UrnDevice {
-            device_id: 3,
-            device_name: "瓮听-西南角".to_string(),
-            deployment_x: 50.0,
-            deployment_y: 50.0,
-            deployment_z: -2.0,
-            urn_volume: 0.05,
-            neck_radius: 0.05,
-            neck_length: 0.1,
-        },
-        UrnDevice {
-            device_id: 4,
-            device_name: "瓮听-西北角".to_string(),
-            deployment_x: -50.0,
-            deployment_y: 50.0,
-            deployment_z: -2.0,
-            urn_volume: 0.05,
-            neck_radius: 0.05,
-            neck_length: 0.1,
-        },
-        UrnDevice {
-            device_id: 5,
-            device_name: "瓮听-正中央".to_string(),
-            deployment_x: 0.0,
-            deployment_y: 0.0,
-            deployment_z: -2.0,
-            urn_volume: 0.08,
-            neck_radius: 0.06,
-            neck_length: 0.12,
-        },
-    ];
-
-    for device in default_devices {
-        info!("注册默认设备: {} (ID={})", device.device_name, device.device_id);
-        devices.insert(device.device_id, device);
-    }
-
-    let acoustic_config = config.acoustics.clone();
-    let analyzer = AcousticAnalyzer::new(
-        acoustic_config.speed_of_sound,
-        acoustic_config.drift_warning_threshold_percent,
-        acoustic_config.drift_critical_threshold_percent,
+    info!("[Boot] 初始化 ClickHouse...");
+    let store = store::ClickHouseStore::new(
+        &cfg.app.clickhouse.url,
+        &cfg.app.clickhouse.database,
+        &cfg.app.clickhouse.user,
+        &cfg.app.clickhouse.password,
     );
 
-    let loc_config = config.localization.clone();
-    let beamformer = Beamformer::new(
-        loc_config.sound_speed_soil,
-        loc_config.beamforming_resolution,
-        loc_config.max_localization_distance,
-        loc_config.localization_confidence_threshold,
-    );
+    info!("[Boot] 构建 pipeline 通道...");
+    let p = &cfg.app.pipeline;
 
-    let mqtt_subscriber = Arc::new(MqttSubscriber::new(
-        store.clone(),
-        analyzer,
-        beamformer,
-        alert_manager.clone(),
-        devices.clone(),
-    ));
+    let (mqtt_to_acoustic_tx, mqtt_to_acoustic_rx) = mpsc::channel(p.mqtt_to_acoustic_buffer);
+    let (mqtt_to_alarm_tx, mqtt_to_alarm_rx) = mpsc::channel(p.mqtt_to_acoustic_buffer);
+    let (mqtt_to_db_tx, mqtt_to_db_rx) = mpsc::channel(p.sensor_raw_to_db_buffer);
 
-    let mqtt_config = config.mqtt.clone();
+    let (acoustic_to_locator_tx, acoustic_to_locator_rx) = mpsc::channel(p.acoustic_to_locator_buffer);
+    let (acoustic_to_alarm_tx, acoustic_to_alarm_rx) = mpsc::channel(p.acoustic_to_locator_buffer);
+    let (acoustic_to_db_tx, acoustic_to_db_rx) = mpsc::channel(p.sensor_raw_to_db_buffer);
+
+    let (locator_to_alarm_tx, locator_to_alarm_rx) = mpsc::channel(p.locator_to_alarm_buffer);
+    let (locator_to_db_tx, locator_to_db_rx) = mpsc::channel(p.sensor_raw_to_db_buffer);
+
+    let (alarm_to_db_tx, alarm_to_db_rx) = mpsc::channel(p.sensor_raw_to_db_buffer);
+
+    let alarm_service = AlarmWsService::new(&cfg.app.alert);
+    let simulator = AcousticSimulator::new(cfg.acoustics.clone());
+    let locator = SourceLocator::new(cfg.app.localization.clone());
+    let db_writer = DbWriter::new(store.clone());
+    let receiver = Arc::new(MqttReceiver::new(devices.clone(), cfg.app.mqtt.clone()));
+
+    info!("[Boot] 启动 pipeline workers...");
+
     tokio::spawn(async move {
-        info!("启动MQTT订阅服务...");
-        mqtt_subscriber.run(&mqtt_config).await;
+        receiver
+            .run(mqtt_to_acoustic_tx, mqtt_to_alarm_tx, mqtt_to_db_tx)
+            .await;
     });
+
+    tokio::spawn(async move {
+        simulator
+            .run(
+                mqtt_to_acoustic_rx,
+                acoustic_to_locator_tx,
+                acoustic_to_alarm_tx,
+                acoustic_to_db_tx,
+            )
+            .await;
+    });
+
+    tokio::spawn(async move {
+        locator
+            .run(acoustic_to_locator_rx, locator_to_alarm_tx, locator_to_db_tx)
+            .await;
+    });
+
+    let alarm_for_app = alarm_service.clone();
+    tokio::spawn(async move {
+        alarm_service
+            .run(
+                mqtt_to_alarm_rx,
+                acoustic_to_alarm_rx,
+                locator_to_alarm_rx,
+                alarm_to_db_tx,
+            )
+            .await;
+    });
+
+    tokio::spawn(async move {
+        db_writer
+            .run(mqtt_to_db_rx, acoustic_to_db_rx, locator_to_db_rx, alarm_to_db_rx)
+            .await;
+    });
+
+    info!("[Boot] 构建 HTTP/WS 服务...");
 
     let app_state = AppState {
         store: store.clone(),
-        alert_manager: alert_manager.clone(),
+        alarm_manager: alarm_for_app,
         devices: devices.clone(),
-        config: config.clone(),
+        config: cfg.app.clone(),
+        acoustics_config: cfg.acoustics.clone(),
+        media_config: cfg.media.clone(),
     };
 
     let cors = CorsLayer::new()
@@ -262,7 +148,7 @@ async fn main() {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let static_dir_path = config.server.static_dir.clone();
+    let static_dir_path = cfg.app.server.static_dir.clone();
     let serve_dir = ServeDir::new(static_dir_path);
 
     let app = Router::new()
@@ -273,6 +159,7 @@ async fn main() {
         .route("/api/localizations", get(handlers::get_recent_localizations))
         .route("/api/alerts", get(handlers::get_recent_alerts))
         .route("/api/medium-properties", get(handlers::get_medium_properties))
+        .route("/api/acoustics/config", get(handlers::get_acoustics_config))
         .route("/api/resonance/calculate", get(handlers::calculate_resonance))
         .route("/api/simulate/reading", post(handlers::simulate_reading))
         .route("/api/ws/broadcast-test", get(handlers::broadcast_test_message))
@@ -281,13 +168,13 @@ async fn main() {
         .layer(cors)
         .with_state(app_state);
 
-    let addr = format!("{}:{}", config.server.host, config.server.port);
-    info!("瓮听声学系统后端服务启动中: {}", addr);
+    let addr = format!("{}:{}", cfg.app.server.host, cfg.app.server.port);
+    info!("[Boot] 瓮听声学系统后端服务启动中: http://{}", addr);
 
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
-            error!("无法绑定地址 {}: {}", addr, e);
+            error!("[Boot] 无法绑定地址 {}: {}", addr, e);
             std::process::exit(1);
         }
     };
@@ -296,16 +183,28 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
     {
-        Ok(_) => info!("服务器正常关闭"),
-        Err(e) => error!("服务器错误: {}", e),
+        Ok(_) => info!("[Boot] 服务器正常关闭"),
+        Err(e) => error!("[Boot] 服务器错误: {}", e),
+    }
+}
+
+fn register_default_devices(devices: &DashMap<u32, UrnDevice>) {
+    let defaults = vec![
+        UrnDevice { device_id: 1, device_name: "瓮听-东北角".into(), deployment_x: -50.0, deployment_y: -50.0, deployment_z: -2.0, urn_volume: 0.05, neck_radius: 0.05, neck_length: 0.1 },
+        UrnDevice { device_id: 2, device_name: "瓮听-东南角".into(), deployment_x: 50.0, deployment_y: -50.0, deployment_z: -2.0, urn_volume: 0.05, neck_radius: 0.05, neck_length: 0.1 },
+        UrnDevice { device_id: 3, device_name: "瓮听-西南角".into(), deployment_x: 50.0, deployment_y: 50.0, deployment_z: -2.0, urn_volume: 0.05, neck_radius: 0.05, neck_length: 0.1 },
+        UrnDevice { device_id: 4, device_name: "瓮听-西北角".into(), deployment_x: -50.0, deployment_y: 50.0, deployment_z: -2.0, urn_volume: 0.05, neck_radius: 0.05, neck_length: 0.1 },
+        UrnDevice { device_id: 5, device_name: "瓮听-正中央".into(), deployment_x: 0.0, deployment_y: 0.0, deployment_z: -2.0, urn_volume: 0.08, neck_radius: 0.06, neck_length: 0.12 },
+    ];
+    for d in defaults {
+        info!("[Boot] 注册默认设备: {} (ID={})", d.device_name, d.device_id);
+        devices.insert(d.device_id, d);
     }
 }
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
     };
 
     #[cfg(unix)]
@@ -324,5 +223,5 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 
-    info!("收到关闭信号，正在优雅停止服务...");
+    info!("[Boot] 收到关闭信号，正在优雅停止服务...");
 }

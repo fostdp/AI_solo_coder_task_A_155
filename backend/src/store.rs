@@ -1,7 +1,30 @@
-use crate::models::{Alert, ResonanceAnalysisResult, SensorReading, SourceLocalizationResult, UrnDevice, MediumProperty};
+use chrono::{DateTime, Utc};
+use clickhouse::Row;
 use clickhouse::Client;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use uuid::Uuid;
+
+use crate::models::{
+    Alert, MediumProperty, ResonanceAnalysisResult, SensorReading, SourceLocalizationResult, UrnDevice,
+};
+
+#[derive(Row, Serialize, Deserialize, Debug, Clone)]
+pub struct LocRow {
+    pub timestamp: DateTime<Utc>,
+    pub source_id: u64,
+    pub source_x: f64,
+    pub source_y: f64,
+    pub source_z: f64,
+    pub bearing_angle: f64,
+    pub elevation_angle: f64,
+    pub distance_estimate: f64,
+    pub confidence: f64,
+    pub tdoa_matrix: String,
+    pub beamformed_power: f64,
+    pub used_devices: Vec<u32>,
+}
 
 #[derive(Clone)]
 pub struct ClickHouseStore {
@@ -24,21 +47,9 @@ impl ClickHouseStore {
     }
 
     pub async fn insert_sensor_reading(&self, reading: &SensorReading) -> Result<(), clickhouse::error::Error> {
-        let mut inserter = self.client
-            .insert("sensor_data")?;
-
-        inserter
-            .write(reading.timestamp)
-            .write(reading.device_id)
-            .write(reading.sound_pressure_level)
-            .write(reading.resonance_frequency)
-            .write(reading.source_direction)
-            .write(reading.medium_density)
-            .write(reading.temperature)
-            .write(reading.humidity)
-            .commit()
-            .await?;
-
+        let mut inserter = self.client.insert("sensor_data")?;
+        inserter.write(reading).await?;
+        inserter.end().await?;
         Ok(())
     }
 
@@ -46,22 +57,9 @@ impl ClickHouseStore {
         &self,
         analysis: &ResonanceAnalysisResult,
     ) -> Result<(), clickhouse::error::Error> {
-        let mut inserter = self.client
-            .insert("resonance_analysis")?;
-
-        inserter
-            .write(analysis.timestamp)
-            .write(analysis.device_id)
-            .write(analysis.measured_resonance_freq)
-            .write(analysis.theoretical_resonance_freq)
-            .write(analysis.gain_db)
-            .write(analysis.quality_factor)
-            .write(analysis.frequency_drift)
-            .write(analysis.drift_percent)
-            .write(analysis.is_anomaly)
-            .commit()
-            .await?;
-
+        let mut inserter = self.client.insert("resonance_analysis")?;
+        inserter.write(analysis).await?;
+        inserter.end().await?;
         Ok(())
     }
 
@@ -71,44 +69,31 @@ impl ClickHouseStore {
     ) -> Result<(), clickhouse::error::Error> {
         let tdoa_str = serde_json::to_string(&loc.tdoa_matrix).unwrap_or_default();
 
-        let mut inserter = self.client
-            .insert("source_localization")?;
+        let row = LocRow {
+            timestamp: loc.timestamp,
+            source_id: loc.source_id,
+            source_x: loc.source_x,
+            source_y: loc.source_y,
+            source_z: loc.source_z,
+            bearing_angle: loc.bearing_angle,
+            elevation_angle: loc.elevation_angle,
+            distance_estimate: loc.distance_estimate,
+            confidence: loc.confidence,
+            tdoa_matrix: tdoa_str,
+            beamformed_power: loc.beamformed_power,
+            used_devices: loc.used_devices.clone(),
+        };
 
-        inserter
-            .write(loc.timestamp)
-            .write(loc.source_id)
-            .write(loc.source_x)
-            .write(loc.source_y)
-            .write(loc.source_z)
-            .write(loc.bearing_angle)
-            .write(loc.elevation_angle)
-            .write(loc.distance_estimate)
-            .write(loc.confidence)
-            .write(tdoa_str)
-            .write(loc.beamformed_power)
-            .write(loc.used_devices.clone())
-            .commit()
-            .await?;
-
+        let mut inserter = self.client.insert("source_localization")?;
+        inserter.write(&row).await?;
+        inserter.end().await?;
         Ok(())
     }
 
     pub async fn insert_alert(&self, alert: &Alert) -> Result<(), clickhouse::error::Error> {
-        let mut inserter = self.client
-            .insert("alerts")?;
-
-        inserter
-            .write(alert.timestamp)
-            .write(alert.alert_id)
-            .write(alert.alert_type.clone())
-            .write(alert.severity.clone())
-            .write(alert.device_id)
-            .write(alert.message.clone())
-            .write(alert.details.clone())
-            .write(alert.is_resolved)
-            .commit()
-            .await?;
-
+        let mut inserter = self.client.insert("alerts")?;
+        inserter.write(alert).await?;
+        inserter.end().await?;
         Ok(())
     }
 
@@ -116,11 +101,7 @@ impl ClickHouseStore {
         let query = "SELECT device_id, device_name, deployment_x, deployment_y, deployment_z,
                      urn_volume, neck_radius, neck_length FROM urn_devices";
 
-        let devices = self.client
-            .query(query)
-            .fetch_all::<UrnDevice>()
-            .await?;
-
+        let devices = self.client.query(query).fetch_all::<UrnDevice>().await?;
         Ok(devices)
     }
 
@@ -146,20 +127,14 @@ impl ClickHouseStore {
             )
         };
 
-        let readings = self.client
-            .query(&query)
-            .fetch_all::<SensorReading>()
-            .await?;
-
+        let readings = self.client.query(&query).fetch_all::<SensorReading>().await?;
         Ok(readings)
     }
 
     pub async fn get_medium_properties(&self) -> Result<Vec<MediumProperty>, clickhouse::error::Error> {
-        let query = "SELECT medium_type, density, sound_speed, attenuation_coeff FROM medium_properties";
-        let props = self.client
-            .query(query)
-            .fetch_all::<MediumProperty>()
-            .await?;
+        let query = "SELECT medium_type, display_name, density, sound_speed, attenuation_coeff,
+                     depth_start, thickness FROM medium_properties";
+        let props = self.client.query(query).fetch_all::<MediumProperty>().await?;
         Ok(props)
     }
 
@@ -169,16 +144,14 @@ impl ClickHouseStore {
              FROM alerts ORDER BY timestamp DESC LIMIT {}",
             limit
         );
-
-        let alerts = self.client
-            .query(&query)
-            .fetch_all::<Alert>()
-            .await?;
-
+        let alerts = self.client.query(&query).fetch_all::<Alert>().await?;
         Ok(alerts)
     }
 
-    pub async fn get_recent_localizations(&self, limit: u32) -> Result<Vec<SourceLocalizationResult>, clickhouse::error::Error> {
+    pub async fn get_recent_localizations(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<SourceLocalizationResult>, clickhouse::error::Error> {
         let query = format!(
             "SELECT timestamp, source_id, source_x, source_y, source_z, bearing_angle,
              elevation_angle, distance_estimate, confidence, tdoa_matrix, beamformed_power,
@@ -186,11 +159,25 @@ impl ClickHouseStore {
             limit
         );
 
-        let results = self.client
-            .query(&query)
-            .fetch_all::<SourceLocalizationResult>()
-            .await?;
-
+        let rows = self.client.query(&query).fetch_all::<LocRow>().await?;
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            let tdoa: Vec<Vec<f64>> = serde_json::from_str(&row.tdoa_matrix).unwrap_or_default();
+            results.push(SourceLocalizationResult {
+                timestamp: row.timestamp,
+                source_id: row.source_id,
+                source_x: row.source_x,
+                source_y: row.source_y,
+                source_z: row.source_z,
+                bearing_angle: row.bearing_angle,
+                elevation_angle: row.elevation_angle,
+                distance_estimate: row.distance_estimate,
+                confidence: row.confidence,
+                tdoa_matrix: tdoa,
+                beamformed_power: row.beamformed_power,
+                used_devices: row.used_devices,
+            });
+        }
         Ok(results)
     }
 }

@@ -96,21 +96,24 @@ COMMENT '系统告警表';
 CREATE TABLE IF NOT EXISTS medium_properties
 (
     medium_type String,
+    display_name String,
     density Float64,
     sound_speed Float64,
-    attenuation_coeff Float64
+    attenuation_coeff Float64,
+    depth_start Float64,
+    thickness Float64
 )
 ENGINE = ReplacingMergeTree
 ORDER BY medium_type
 COMMENT '地下介质声学参数表';
 
-INSERT INTO medium_properties (medium_type, density, sound_speed, attenuation_coeff) VALUES
-('dry_sand', 1600.0, 300.0, 0.5),
-('wet_sand', 1900.0, 500.0, 0.3),
-('clay', 2000.0, 1200.0, 0.2),
-('limestone', 2500.0, 3500.0, 0.05),
-('granite', 2700.0, 4500.0, 0.03),
-('water_saturated_soil', 2200.0, 1800.0, 0.15);
+INSERT INTO medium_properties (medium_type, display_name, density, sound_speed, attenuation_coeff, depth_start, thickness) VALUES
+('dry_sand', '干燥沙', 1600.0, 300.0, 0.5, 0.0, 5.0),
+('wet_sand', '湿润沙', 1900.0, 500.0, 0.3, 5.0, 15.0),
+('clay', '黏土', 2200.0, 1800.0, 0.15, 20.0, 30.0),
+('limestone', '石灰岩', 2500.0, 3500.0, 0.05, 50.0, 50.0),
+('granite', '花岗岩', 2700.0, 4500.0, 0.03, 100.0, 100.0),
+('water_saturated_soil', '饱和水土', 2200.0, 1800.0, 0.15, 150.0, 50.0);
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_data_1min_mv
 ENGINE = SummingMergeTree

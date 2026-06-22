@@ -1,22 +1,22 @@
-use crate::alerts::AlertManager;
+use crate::handlers::AppState;
 use crate::models::WebSocketMessage;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
 use tracing::{debug, error, info};
 
 pub async fn websocket_handler(
     ws: WebSocketUpgrade,
-    State(alert_manager): State<Arc<AlertManager>>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket, alert_manager))
+    let alarm_manager = state.alarm_manager.clone();
+    ws.on_upgrade(|socket| handle_socket(socket, alarm_manager))
 }
 
-async fn handle_socket(socket: WebSocket, alert_manager: Arc<AlertManager>) {
+async fn handle_socket<AM: WsSenderProvider>(socket: WebSocket, alarm_manager: AM) {
     let (mut sender, mut receiver) = socket.split();
-    let mut rx = alert_manager.sender().subscribe();
+    let mut rx = alarm_manager.broadcast_rx();
 
     info!("新WebSocket客户端已连接");
 
@@ -58,6 +58,16 @@ async fn handle_socket(socket: WebSocket, alert_manager: Arc<AlertManager>) {
     }
 
     info!("WebSocket客户端已断开");
+}
+
+pub trait WsSenderProvider: Send + Sync + 'static {
+    fn broadcast_rx(&self) -> tokio::sync::broadcast::Receiver<WebSocketMessage>;
+}
+
+impl WsSenderProvider for std::sync::Arc<crate::alarm_ws::AlarmWsService> {
+    fn broadcast_rx(&self) -> tokio::sync::broadcast::Receiver<WebSocketMessage> {
+        self.sender().subscribe()
+    }
 }
 
 pub fn create_ws_message(message_type: &str, data: serde_json::Value) -> WebSocketMessage {
