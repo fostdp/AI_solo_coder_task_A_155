@@ -129,6 +129,29 @@
                         <button id="btn-simulate-event">模拟敌军来袭</button>
                     </div>
                 </section>
+
+                <section class="panel-section">
+                    <h2>多层介质声射线追踪</h2>
+                    <div class="ray-tracing-wrapper">
+                        <canvas id="ray-tracing-canvas" width="300" height="220"></canvas>
+                    </div>
+                    <div class="layer-legend">
+                        <div><span class="layer-swatch" style="background:#c9a46a"></span>干燥沙层</div>
+                        <div><span class="layer-swatch" style="background:#a07840"></span>湿润沙层</div>
+                        <div><span class="layer-swatch" style="background:#6b4423"></span>黏土层</div>
+                        <div><span class="layer-swatch" style="background:#8b8b8b"></span>石灰岩层</div>
+                    </div>
+                    <div class="ray-info">
+                        <div class="info-row">
+                            <span>反射次数</span>
+                            <span id="ray-reflections">--</span>
+                        </div>
+                        <div class="info-row">
+                            <span>折射次数</span>
+                            <span id="ray-refractions">--</span>
+                        </div>
+                    </div>
+                </section>
             </aside>
         </div>
     </div>

@@ -22,6 +22,343 @@
     let devices = [];
     let ws = null;
 
+    const mediumLayers = [
+        { name: 'dry_sand', depth: 0, thickness: 5, density: 1600, soundSpeed: 300, attenuation: 0.5, color: '#c9a46a' },
+        { name: 'wet_sand', depth: 5, thickness: 15, density: 1900, soundSpeed: 500, attenuation: 0.3, color: '#a07840' },
+        { name: 'clay', depth: 20, thickness: 30, density: 2200, soundSpeed: 1800, attenuation: 0.15, color: '#6b4423' },
+        { name: 'limestone', depth: 50, thickness: 50, density: 2500, soundSpeed: 3500, attenuation: 0.05, color: '#8b8b8b' },
+    ];
+
+    let rayPaths = [];
+    let rayStats = { reflections: 0, refractions: 0 };
+    let waveRays = [];
+
+    function snellsLaw(angleIncidence, v1, v2) {
+        const sinTheta2 = (v2 / v1) * Math.sin(angleIncidence);
+        if (Math.abs(sinTheta2) > 1) return null;
+        return Math.asin(sinTheta2);
+    }
+
+    function reflectionCoefficient(angleIncidence, rho1, rho2, v1, v2) {
+        const transAngle = snellsLaw(angleIncidence, v1, v2);
+        if (transAngle === null) return 1.0;
+        const normalR = Math.abs((rho2 * v2 - rho1 * v1) / (rho2 * v2 + rho1 * v1));
+        const angularFactor = Math.abs(Math.cos(angleIncidence) - Math.cos(transAngle))
+            / Math.abs(Math.cos(angleIncidence) + Math.cos(transAngle));
+        return normalR * 0.5 + angularFactor * 0.5;
+    }
+
+    function transmissionCoefficient(angleIncidence, rho1, rho2, v1, v2) {
+        const r = reflectionCoefficient(angleIncidence, rho1, rho2, v1, v2);
+        return Math.sqrt(1 - r * r);
+    }
+
+    function traceRay(startX, startDepth, angle, frequency, maxBounces) {
+        const points = [];
+        let x = startX;
+        let y = startDepth;
+        let theta = angle;
+        let amplitude = 1.0;
+        let layerIdx = 0;
+        let bounces = 0;
+        let reflections = 0;
+        let refractions = 0;
+
+        for (let idx = 0; idx < mediumLayers.length; idx++) {
+            const layer = mediumLayers[idx];
+            if (y >= layer.depth && y < layer.depth + layer.thickness) {
+                layerIdx = idx;
+                break;
+            }
+        }
+
+        points.push({ x, y, amplitude, layerIndex: layerIdx, type: 'start' });
+
+        const maxSteps = 150;
+        for (let step = 0; step < maxSteps; step++) {
+            const layer = mediumLayers[layerIdx];
+            if (!layer) break;
+
+            const dirX = Math.sin(theta);
+            const dirY = Math.cos(theta);
+
+            if (Math.abs(dirY) < 0.001) break;
+
+            let hitDepth = null;
+            let hitType = null;
+
+            if (dirY > 0) {
+                const bottomY = layer.depth + layer.thickness;
+                if (bottomY <= 80) {
+                    hitDepth = bottomY;
+                    hitType = 'bottom';
+                }
+            } else {
+                const topY = layer.depth;
+                if (topY > 0 || layerIdx === 0) {
+                    hitDepth = topY;
+                    hitType = 'top';
+                }
+            }
+
+            if (hitDepth === null) break;
+
+            const t = (hitDepth - y) / dirY;
+            if (t <= 0) break;
+
+            const hitX = x + dirX * t;
+
+            const dist = t;
+            amplitude *= Math.exp(-layer.attenuation * dist);
+            amplitude /= Math.max(1, dist * 0.02);
+
+            if (amplitude < 0.001) {
+                points.push({ x: hitX, y: hitDepth, amplitude, layerIndex: layerIdx, type: 'end' });
+                break;
+            }
+
+            if (hitType === 'bottom' && layerIdx < mediumLayers.length - 1) {
+                const nextLayer = mediumLayers[layerIdx + 1];
+                const incidentAngle = theta;
+                const r = reflectionCoefficient(incidentAngle, layer.density, nextLayer.density, layer.soundSpeed, nextLayer.soundSpeed);
+                const tCoef = transmissionCoefficient(incidentAngle, layer.density, nextLayer.density, layer.soundSpeed, nextLayer.soundSpeed);
+
+                const transAngle = snellsLaw(incidentAngle, layer.soundSpeed, nextLayer.soundSpeed);
+
+                points.push({
+                    x: hitX, y: hitDepth,
+                    amplitude: amplitude * tCoef,
+                    layerIndex: layerIdx,
+                    type: 'refraction'
+                });
+                refractions++;
+
+                if (bounces < maxBounces) {
+                    const reflectAmp = amplitude * r;
+                    if (reflectAmp > 0.01) {
+                        bounces++;
+                        reflections++;
+                    }
+                }
+
+                if (transAngle !== null) {
+                    theta = transAngle;
+                    layerIdx++;
+                    amplitude *= tCoef;
+                    x = hitX;
+                    y = hitDepth;
+                } else {
+                    theta = -theta;
+                    bounces++;
+                    reflections++;
+                    x = hitX;
+                    y = hitDepth;
+                }
+            } else if (hitType === 'top' && layerIdx > 0) {
+                const upperLayer = mediumLayers[layerIdx - 1];
+                const incidentAngle = -theta;
+                const r = reflectionCoefficient(incidentAngle, layer.density, upperLayer.density, layer.soundSpeed, upperLayer.soundSpeed);
+                const tCoef = transmissionCoefficient(incidentAngle, layer.density, upperLayer.density, layer.soundSpeed, upperLayer.soundSpeed);
+
+                const transAngle = snellsLaw(incidentAngle, layer.soundSpeed, upperLayer.soundSpeed);
+
+                points.push({
+                    x: hitX, y: hitDepth,
+                    amplitude: amplitude * tCoef,
+                    layerIndex: layerIdx,
+                    type: 'refraction-up'
+                });
+                refractions++;
+
+                if (transAngle !== null) {
+                    theta = -transAngle;
+                    layerIdx--;
+                    amplitude *= tCoef;
+                    x = hitX;
+                    y = hitDepth;
+                } else {
+                    theta = -theta;
+                    bounces++;
+                    reflections++;
+                    x = hitX;
+                    y = hitDepth;
+                }
+            } else if (hitType === 'top' && layerIdx === 0) {
+                points.push({
+                    x: hitX, y: hitDepth,
+                    amplitude,
+                    layerIndex: 0,
+                    type: 'surface'
+                });
+                break;
+            } else {
+                break;
+            }
+        }
+
+        return { points, reflections, refractions };
+    }
+
+    function computeRayPaths(sourceX, sourceDepth, frequency) {
+        const paths = [];
+        let totalReflections = 0;
+        let totalRefractions = 0;
+        const numAngles = 15;
+
+        for (let i = 0; i <= numAngles; i++) {
+            const angle = -Math.PI / 2.5 + (Math.PI / 2.5) * i / numAngles;
+            const result = traceRay(sourceX, sourceDepth, angle, frequency, 4);
+            if (result.points.length > 1) {
+                paths.push(result.points);
+                totalReflections += result.reflections;
+                totalRefractions += result.refractions;
+            }
+        }
+
+        return { paths, reflections: totalReflections, refractions: totalRefractions };
+    }
+
+    function drawRayTracing() {
+        const canvas = document.getElementById('ray-tracing-canvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+
+        ctx.clearRect(0, 0, w, h);
+
+        const maxDepth = 80;
+        const scaleY = (h - 30) / maxDepth;
+        const offsetX = 10;
+        const plotW = w - offsetX * 2;
+
+        mediumLayers.forEach((layer, idx) => {
+            const y = 20 + layer.depth * scaleY;
+            const layerH = layer.thickness * scaleY;
+            const grad = ctx.createLinearGradient(0, y, 0, y + layerH);
+            grad.addColorStop(0, layer.color);
+            grad.addColorStop(1, shadeColor(layer.color, -15));
+            ctx.fillStyle = grad;
+            ctx.fillRect(offsetX, y, plotW, layerH);
+
+            if (idx > 0) {
+                ctx.beginPath();
+                ctx.moveTo(offsetX, y);
+                ctx.lineTo(offsetX + plotW, y);
+                ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(`${layer.depth}m`, 2, y + 10);
+        });
+
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.fillRect(offsetX, 20, plotW, 1);
+        ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        ctx.font = '10px sans-serif';
+        ctx.fillText('地表', offsetX + 4, 16);
+
+        let sourceX = offsetX + plotW * 0.5;
+        let sourceY = 20 + 2 * scaleY;
+
+        if (latestLocalization) {
+            const distFactor = Math.min(1, latestLocalization.distance_estimate / 300);
+            sourceX = offsetX + plotW * (0.2 + distFactor * 0.6);
+            sourceY = 20 + Math.abs(latestLocalization.source_z) * scaleY;
+        }
+
+        rayPaths.forEach((path, pidx) => {
+            if (path.length < 2) return;
+            const colorIntensity = 1 - pidx / rayPaths.length * 0.5;
+
+            ctx.beginPath();
+            ctx.moveTo(sourceX, sourceY);
+
+            for (let i = 0; i < path.length; i++) {
+                const pt = path[i];
+                const ptX = sourceX + (pt.x - (latestLocalization ? latestLocalization.source_x : 0)) * 0.8;
+                const ptY = 20 + pt.y * scaleY;
+                ctx.lineTo(ptX, ptY);
+            }
+
+            const alpha = 0.3 + colorIntensity * 0.4;
+            ctx.strokeStyle = `rgba(255, 200, 100, ${alpha})`;
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+        });
+
+        ctx.beginPath();
+        ctx.arc(sourceX, sourceY, 6, 0, Math.PI * 2);
+        const pulse = 0.7 + 0.3 * Math.sin(Date.now() / 300);
+        ctx.fillStyle = `rgba(255, 80, 80, ${pulse})`;
+        ctx.fill();
+        ctx.strokeStyle = '#ff6060';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('声源', sourceX + 10, sourceY + 4);
+
+        const urnX = offsetX + plotW * 0.5;
+        const urnY = 20 + 2 * scaleY;
+        ctx.beginPath();
+        ctx.arc(urnX, urnY, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#60a5fa';
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('瓮听', urnX, urnY - 8);
+    }
+
+    function shadeColor(color, percent) {
+        const num = parseInt(color.replace('#', ''), 16);
+        const amt = Math.round(2.55 * percent);
+        const R = (num >> 16) + amt;
+        const G = (num >> 8 & 0x00FF) + amt;
+        const B = (num & 0x0000FF) + amt;
+        return '#' + (
+            0x1000000 +
+            (R < 255 ? (R < 1 ? 0 : R) : 255) * 0x10000 +
+            (G < 255 ? (G < 1 ? 0 : G) : 255) * 0x100 +
+            (B < 255 ? (B < 1 ? 0 : B) : 255)
+        ).toString(16).slice(1);
+    }
+
+    function updateRayTracing() {
+        if (!latestLocalization) {
+            const result = computeRayPaths(50, 10, 200);
+            rayPaths = result.paths;
+            rayStats.reflections = result.reflections;
+            rayStats.refractions = result.refractions;
+        } else {
+            const freq = latestResonance ? latestResonance.measured_resonance_freq : 200;
+            const result = computeRayPaths(
+                latestLocalization.source_x,
+                Math.abs(latestLocalization.source_z),
+                freq
+            );
+            rayPaths = result.paths;
+            rayStats.reflections = result.reflections;
+            rayStats.refractions = result.refractions;
+        }
+
+        document.getElementById('ray-reflections').textContent = rayStats.reflections;
+        document.getElementById('ray-refractions').textContent = rayStats.refractions;
+
+        drawRayTracing();
+    }
+
     function init() {
         initThree();
         initUI();
@@ -256,6 +593,9 @@
 
         if (!waveAnimationRunning) return;
 
+        const cx = w / 2;
+        const cy = h / 2;
+
         waves.forEach((wave, idx) => {
             wave.radius += wave.speed;
             wave.opacity -= wave.fadeSpeed;
@@ -265,17 +605,15 @@
                 return;
             }
 
-            const cx = w / 2;
-            const cy = h / 2;
-            const grad = ctx.createRadialGradient(cx, cy, wave.radius * 0.8, cx, cy, wave.radius);
-            grad.addColorStop(0, `rgba(96, 165, 250, 0)`);
-            grad.addColorStop(0.7, `rgba(96, 165, 250, ${wave.opacity * 0.3})`);
-            grad.addColorStop(0.85, `rgba(96, 165, 250, ${wave.opacity})`);
-            grad.addColorStop(1, `rgba(96, 165, 250, 0)`);
+            const mainGrad = ctx.createRadialGradient(cx, cy, wave.radius * 0.85, cx, cy, wave.radius);
+            mainGrad.addColorStop(0, `rgba(96, 165, 250, 0)`);
+            mainGrad.addColorStop(0.7, `rgba(96, 165, 250, ${wave.opacity * 0.25})`);
+            mainGrad.addColorStop(0.9, `rgba(96, 165, 250, ${wave.opacity})`);
+            mainGrad.addColorStop(1, `rgba(96, 165, 250, 0)`);
 
             ctx.beginPath();
             ctx.arc(cx, cy, wave.radius, 0, Math.PI * 2);
-            ctx.fillStyle = grad;
+            ctx.fillStyle = mainGrad;
             ctx.fill();
 
             ctx.beginPath();
@@ -283,7 +621,87 @@
             ctx.strokeStyle = `rgba(160, 196, 255, ${wave.opacity})`;
             ctx.lineWidth = 2;
             ctx.stroke();
+
+            if (wave.radius > 40 && !wave.hasSecondary) {
+                wave.hasSecondary = true;
+                wave.secondaryRadius = 0;
+            }
         });
+
+        waves.forEach(wave => {
+            if (wave.hasSecondary && wave.secondaryRadius !== undefined) {
+                wave.secondaryRadius += wave.speed * 0.75;
+
+                if (wave.secondaryRadius > 0 && wave.opacity * 0.5 > 0.01) {
+                    const reflectGrad = ctx.createRadialGradient(
+                        cx, cy, wave.secondaryRadius * 0.9,
+                        cx, cy, wave.secondaryRadius
+                    );
+                    reflectGrad.addColorStop(0, `rgba(255, 180, 100, 0)`);
+                    reflectGrad.addColorStop(0.8, `rgba(255, 180, 100, ${wave.opacity * 0.15})`);
+                    reflectGrad.addColorStop(1, `rgba(255, 180, 100, 0)`);
+
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, wave.secondaryRadius, 0, Math.PI * 2);
+                    ctx.fillStyle = reflectGrad;
+                    ctx.fill();
+
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, wave.secondaryRadius, 0, Math.PI * 2);
+                    ctx.strokeStyle = `rgba(255, 200, 120, ${wave.opacity * 0.5})`;
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([6, 4]);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+
+                if (wave.secondaryRadius > 60 && !wave.hasTertiary) {
+                    wave.hasTertiary = true;
+                    wave.tertiaryRadius = 0;
+                }
+            }
+
+            if (wave.hasTertiary && wave.tertiaryRadius !== undefined) {
+                wave.tertiaryRadius += wave.speed * 0.55;
+
+                if (wave.tertiaryRadius > 0 && wave.opacity * 0.25 > 0.01) {
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, wave.tertiaryRadius, 0, Math.PI * 2);
+                    ctx.strokeStyle = `rgba(200, 220, 180, ${wave.opacity * 0.3})`;
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([3, 6]);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+            }
+        });
+
+        if (latestLocalization && waves.length === 0) {
+            const distFactor = Math.min(1, latestLocalization.distance_estimate / 300);
+            const beamAngle = (latestLocalization.bearing_angle - 90) * Math.PI / 180;
+            const spread = 0.3 * (1.2 - latestLocalization.confidence);
+            const beamLen = 80 + distFactor * 150;
+
+            const beamGrad = ctx.createRadialGradient(
+                cx, cy, 0,
+                cx + Math.cos(beamAngle) * beamLen,
+                cy + Math.sin(beamAngle) * beamLen,
+                beamLen * 0.3
+            );
+            beamGrad.addColorStop(0, 'rgba(255, 100, 100, 0.3)');
+            beamGrad.addColorStop(1, 'rgba(255, 100, 100, 0)');
+
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(beamAngle);
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.arc(0, 0, beamLen, -spread, spread);
+            ctx.closePath();
+            ctx.fillStyle = beamGrad;
+            ctx.fill();
+            ctx.restore();
+        }
     }
 
     function spawnWave() {
@@ -292,6 +710,8 @@
             speed: 2.5,
             opacity: 0.8,
             fadeSpeed: 0.008,
+            hasSecondary: false,
+            hasTertiary: false,
         });
     }
 
@@ -590,6 +1010,7 @@
         drawCompass();
         drawSparkline();
         drawWaveOverlay();
+        updateRayTracing();
     }
 
     function renderAlerts() {

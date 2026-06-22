@@ -345,6 +345,46 @@ body {
     background: #1a2440;
 }
 
+.ray-tracing-wrapper {
+    background: #0d1220;
+    border-radius: 6px;
+    padding: 4px;
+    margin-bottom: 8px;
+}
+
+.ray-tracing-wrapper canvas {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.layer-legend {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 12px;
+    margin-bottom: 12px;
+    font-size: 11px;
+    color: #a8b2cc;
+}
+
+.layer-legend > div {
+    display: flex;
+    align-items: center;
+}
+
+.layer-swatch {
+    display: inline-block;
+    width: 14px;
+    height: 10px;
+    border-radius: 2px;
+    margin-right: 6px;
+    border: 1px solid rgba(255,255,255,0.1);
+}
+
+.ray-info {
+    margin-top: 8px;
+}
+
 ::-webkit-scrollbar {
     width: 6px;
 }
